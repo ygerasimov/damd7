@@ -1,0 +1,383 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function damedia_menu() {
+  $items = array();
+
+  $items['file/add/damedia'] = array(
+    'title' => 'DAMedia',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('damedia_entity_add_upload'),
+    'access callback' => 'damedia_browser_plugin_access',
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_stream_wrappers().
+ */
+function damedia_stream_wrappers() {
+  return array(
+    'damedia' => array(
+      'name' => t('DAMedia assets'),
+      'class' => 'DAMediaStreamWrapper',
+      'description' => t('Assets provided by DAMedia.'),
+      'type' => STREAM_WRAPPERS_READ_VISIBLE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_media_browser_plugin_info().
+ */
+function damedia_media_browser_plugin_info() {
+  $plugins['damedia_file_upload'] = array(
+    'title' => t('DAM Upload'),
+    'class' => 'DAMediaMediaBrowserUpload',
+    // Support for Media 1.x browser plugin API.
+    '#title' => t('DAMedia Upload'),
+    'access callback' => 'damedia_browser_plugin_access',
+  );
+  $plugins['damedia_browse'] = array(
+    'title' => t('DAM Browse'),
+    'class' => 'DAMediaMediaBrowserSearch',
+    // Support for Media 1.x browser plugin API.
+    '#title' => t('DAM Browse'),
+    'access callback' => 'damedia_browser_plugin_access',
+  );
+  return $plugins;
+}
+
+/**
+ * Media 1.x browser plugin access callback.
+ */
+function damedia_browser_plugin_access() {
+  return user_access('administer files');
+}
+
+/**
+ * Implements hook_media_browser_plugin_view().
+ */
+function damedia_media_browser_plugin_view($plugin_name, $params) {
+  if ($plugin_name == 'damedia_file_upload' && damedia_browser_plugin_access()) {
+    $params += array('types' => array());
+    $form = drupal_get_form('damedia_entity_add_upload', $params);
+    return array(
+      '#title' => t('DAMedia'),
+      'form' => array($form),
+    );
+  }
+}
+
+/**
+ * Mimic file_entity_add_upload().
+ */
+function damedia_entity_add_upload($form, &$form_state, $options = array()) {
+
+  drupal_set_title(t('Upload file to DAM'));
+
+  module_load_include('inc', 'file_entity', 'file_entity.pages');
+
+  if (!is_array($options)) {
+    $options = array($options);
+  }
+  $step = (isset($form_state['step']) && in_array($form_state['step'], array(1, 2, 3, 4))) ? $form_state['step'] : 1;
+  $form['#step'] = $step;
+  $form['#options'] = $options + array(
+      'types' => array(),
+      'enabledPlugins' => array(),
+      'schemes' => array(),
+      'max_filesize' => '',
+      'uri_scheme' => 'public',
+      'plugins' => ''
+    );
+
+  switch ($step) {
+    case 1:
+      return file_entity_add_upload_step_upload($form, $form_state, $options);
+
+    case 2:
+      return file_entity_add_upload_step_filetype($form, $form_state, $options);
+
+    case 3:
+      return file_entity_add_upload_step_scheme($form, $form_state, $options);
+
+    case 4:
+      return file_entity_add_upload_step_fields($form, $form_state, $options);
+
+  }
+}
+
+/**
+ * Submit handler for the add file form.
+ */
+function damedia_entity_add_upload_submit($form, &$form_state) {
+  $form_state['storage'] = isset($form_state['storage']) ? $form_state['storage'] : array();
+  $form_state['storage'] = array_merge($form_state['storage'], $form_state['values']);
+
+  // Field selected allowed types.
+  $selected_files = $form['#options']['types'];
+
+  // This var is set to TRUE when we are ready to save the file.
+  $save = FALSE;
+  $trigger = $form_state['triggering_element']['#id'];
+
+  $steps_to_check = array(2, 3);
+  if ($trigger == 'edit-previous') {
+    // If the previous button was hit,
+    // the step checking order should be reversed 3, 2.
+    $steps_to_check = array_reverse($steps_to_check);
+  }
+
+  foreach ($steps_to_check as $step) {
+    // Check if we can skip step 2 and 3.
+    if (($form['#step'] == $step - 1 && $trigger == 'edit-next') || ($form['#step'] == $step + 1 && $trigger == 'edit-previous')) {
+      $file = file_load($form_state['storage']['upload']);
+      if ($step == 2) {
+        // Skip second step completely.
+        $form['#step'] += ($trigger == 'edit-previous') ? -1 : 1;
+        $form_state['storage']['type'] = 'image';
+
+        // Check if we can skip step 2.
+//        $candidates = file_entity_get_filetype_candidates($file, $selected_files);
+//        if (count($candidates) == 1) {
+//          $candidates_keys = array_keys($candidates);
+//          // There is only one possible filetype for this file.
+//          // Skip the second page.
+//          $form['#step'] += ($trigger == 'edit-previous') ? -1 : 1;
+//          $form_state['storage']['type'] = reset($candidates_keys);
+//        }
+//        elseif (!$candidates || variable_get('file_entity_file_upload_wizard_skip_file_type', FALSE)) {
+//          // Do not assign the file a file type.
+//          $form['#step'] += ($trigger == 'edit-previous') ? -1 : 1;
+//          $form_state['storage']['type'] = FILE_TYPE_NONE;
+//        }
+      }
+      else {
+        // Check if we can skip step 3.
+        $options = $form['#options'];
+        $schemes = file_get_stream_wrappers(STREAM_WRAPPERS_WRITE_VISIBLE);
+
+        // Remove any schemes not found in the instance settings.
+        if (!empty($options['schemes'])) {
+          $schemes = array_intersect_key($schemes, $options['schemes']);
+        }
+
+        if (!file_entity_file_is_writeable($file)) {
+          // The file is read-only (remote) and must use its provided scheme.
+          $form['#step'] += ($trigger == 'edit-previous') ? -1 : 1;
+          $form_state['storage']['scheme'] = file_uri_scheme($file->uri);
+        }
+        elseif (count($schemes) == 1) {
+          // There is only one possible stream wrapper for this file.
+          // Skip the third page.
+          $form['#step'] += ($trigger == 'edit-previous') ? -1 : 1;
+          $form_state['storage']['scheme'] = key($schemes);
+        }
+        elseif (variable_get('file_entity_file_upload_wizard_skip_scheme', FALSE)) {
+          $form['#step'] += ($trigger == 'edit-previous') ? -1 : 1;
+
+          // Fallback to the URI scheme specified in the field settings
+          // otherwise use the default file scheme.
+          if (!empty($options['uri_scheme'])) {
+            $form_state['storage']['scheme'] = $options['uri_scheme'];
+          }
+          else {
+            $form_state['storage']['scheme'] = file_default_scheme();
+          }
+        }
+      }
+    }
+  }
+
+  // We have the filetype, check if we can skip step 4.
+  if (($form['#step'] == 3 && $trigger == 'edit-next')) {
+    $file = file_load($form_state['storage']['upload']);
+    $form_state['file'] = $file;
+    if (!field_info_instances('file', $form_state['storage']['type'])) {
+      // This filetype doesn't have fields, save the file.
+      $save = TRUE;
+    }
+    elseif (variable_get('file_entity_file_upload_wizard_skip_fields', FALSE)) {
+      // Save the file with blanks fields.
+      $save = TRUE;
+    }
+  }
+
+  // Form id's can vary depending on how many other forms are displayed, so we
+  // need to do string comparissons. e.g edit-submit--2.
+  if (strpos($trigger, 'edit-next') !== FALSE) {
+    $form_state['step'] = $form['#step'] + 1;
+  }
+  elseif (strpos($trigger, 'edit-previous') !== FALSE) {
+    $form_state['step'] = $form['#step'] - 1;
+  }
+  elseif (strpos($trigger, 'edit-submit') !== FALSE) {
+    $save = TRUE;
+  }
+
+  if ($save) {
+    $file = file_load($form_state['storage']['upload']);
+    if ($file) {
+      if (file_uri_scheme($file->uri) != $form_state['storage']['scheme']) {
+        $file_destination = $form_state['storage']['scheme'] . '://' . file_uri_target($file->uri);
+        $file_destination = file_stream_wrapper_uri_normalize($file_destination);
+        if ($moved_file = file_move($file, $file_destination, FILE_EXISTS_RENAME)) {
+          // Only re-assign the file object if file_move() did not fail.
+          $file = $moved_file;
+        }
+      }
+      $file->type = $form_state['storage']['type'];
+      $file->display = TRUE;
+
+      // Change the file from temporary to permanent.
+      $file->status = FILE_STATUS_PERMANENT;
+
+      // Save the form fields.
+      // Keep in mind that the values for the Field API fields must be in
+      // $form_state['values'] and not in ['storage']. This is true as long as
+      // the fields are on the last page of the multi step form.
+      entity_form_submit_build_entity('file', $file, $form, $form_state);
+
+      file_save($file);
+      $form_state['file'] = $file;
+
+    }
+    else {
+      drupal_set_message(t('An error occurred and no file was uploaded.'), 'error');
+      return;
+    }
+
+    damedia_upload_file_to_dam($file);
+
+    // Figure out destination.
+    if (user_access('administer files')) {
+      $path = 'admin/content/file';
+    }
+    else {
+      $path = 'file/' . $file->fid;
+    }
+    $form_state['redirect'] = $path;
+  }
+  else {
+    $form_state['rebuild'] = TRUE;
+  }
+
+  // Clear the page and block caches.
+  cache_clear_all();
+}
+
+/**
+ * Upload file to DAM.
+ */
+function damedia_upload_file_to_dam($file) {
+  $request_body = (object) array(
+    'entity' => $file,
+    'content' => base64_encode(file_get_contents($file->uri))
+  );
+
+  $data_string = json_encode($request_body);
+
+//  dpm($data_string);
+
+  $dam_base_url = trim(variable_get('damedia_url', 'http://dam.docksal/'), '/');
+  $url = $dam_base_url . '/api/file';
+
+  $ch = curl_init($url);
+  curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
+  curl_setopt($ch, CURLOPT_POSTFIELDS, $data_string);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+  curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+      'Content-Type: application/json',
+      'Content-Length: ' . strlen($data_string))
+  );
+
+  $result = json_decode(curl_exec($ch));
+
+  // Check HTTP status code
+  if (!curl_errno($ch)) {
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    if ($http_code != 200) {
+      drupal_set_message(t('Unexpected HTTP code :code, message ":message"', array(':code' => $http_code, ':message' => $result)), 'error');
+      curl_close($ch);
+      return;
+    }
+
+    drupal_set_message(t('@type %name was uploaded to DAM.', array('@type' => file_entity_type_get_name($file), '%name' => $file->filename)));
+    curl_close($ch);
+  }
+
+  // We assume that on DAM files got uploaded to sites/default/files folder.
+  $uploaded_filename = trim($result, '/');
+
+  $file->uri = 'damedia://' . $uploaded_filename;
+  file_save($file);
+}
+
+/**
+ * Search for assets in DAM.
+ */
+function damedia_entity_add_search($form, &$form_state, $options = array()) {
+  $images = array();
+
+  $dam_base_url = trim(variable_get('damedia_url', 'http://dam.docksal/'), '/');
+  $url = $dam_base_url . '/api/file';
+
+  $ch = curl_init();
+  curl_setopt_array($ch, array(
+    CURLOPT_RETURNTRANSFER => 1,
+    CURLOPT_URL => $url
+  ));
+  $result = json_decode(curl_exec($ch));
+
+  $form['dam_images'] = array(
+    '#type' => 'value',
+    '#value' => $result,
+  );
+
+  foreach ($result as $item) {
+    $images[$item->uuid] = theme_image_style(array(
+      'style_name' => 'media_thumbnail',
+      'width' => 100,
+      'height' => 100,
+      'path' => str_replace('public://', 'damedia://', $item->uri)
+    ));
+  }
+
+  $form['image'] = array(
+    '#type' => 'radios',
+    '#title' => t('Select image'),
+    '#options' => $images,
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Select'),
+  );
+
+  return $form;
+}
+
+/**
+ * Submit handler for DAM Search Form.
+ */
+function damedia_entity_add_search_submit($form, &$form_state) {
+  $uuid = $form_state['values']['image'];
+  $dam_images = $form_state['values']['dam_images'];
+
+  $image = $dam_images->{$uuid};
+
+  $file = (object) array(
+    'filename' => drupal_basename($image->uri),
+    'uri' => str_replace('public://', 'damedia://', $image->uri),
+    'filemime' => $image->filemime,
+    'filesize' => $image->filesize,
+    'status' => FILE_STATUS_PERMANENT,
+  );
+  file_save($file);
+  $form_state['file'] = $file;
+}
